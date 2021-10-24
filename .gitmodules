@@ -1,0 +1,3 @@
+[submodule "references/MONet-pytorch"]
+	path = references/MONet-pytorch
+	url = https://github.com/baudm/MONet-pytorch
