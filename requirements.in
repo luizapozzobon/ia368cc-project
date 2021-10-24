@@ -1,14 +1,17 @@
-black == 21.4b0
+ale-py
+black==21.4b0
 cookiecutter
+colabgymrender
 flake8
 gym[atari]
 ipykernel
 jupyterlab
-matplotlib >= 3.2
-numpy >= 1.18
+matplotlib>=3.2
+numpy>=1.18
+opencv-python
 pandas
 pip-tools
 seaborn
 plotly
-tensorflow-gpu >= 2.2
+tensorflow-gpu>=2.2
 

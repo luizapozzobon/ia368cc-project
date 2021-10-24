@@ -9,7 +9,9 @@ absl-py==0.14.1
     #   tensorboard
     #   tensorflow-gpu
 ale-py==0.7.2
-    # via gym
+    # via
+    #   -r requirements.in
+    #   gym
 anyio==3.3.2
     # via jupyter-server
 appdirs==1.4.4
@@ -53,14 +55,18 @@ click==8.0.2
     #   pip-tools
 cloudpickle==2.0.0
     # via gym
+colabgymrender==1.0.9
+    # via -r requirements.in
 cookiecutter==1.7.3
     # via -r requirements.in
 cycler==0.10.0
     # via matplotlib
 debugpy==1.5.0
     # via ipykernel
-decorator==5.1.0
-    # via ipython
+decorator==4.4.2
+    # via
+    #   ipython
+    #   moviepy
 defusedxml==0.7.1
     # via nbconvert
 entrypoints==0.3
@@ -94,6 +100,10 @@ idna==3.2
     # via
     #   anyio
     #   requests
+imageio==2.9.0
+    # via moviepy
+imageio-ffmpeg==0.4.5
+    # via moviepy
 importlib-resources==5.2.2
     # via ale-py
 ipykernel==6.4.1
@@ -176,6 +186,8 @@ mccabe==0.6.1
     # via flake8
 mistune==0.8.4
     # via nbconvert
+moviepy==1.0.3
+    # via colabgymrender
 mypy-extensions==0.4.3
     # via black
 nbclassic==0.3.2
@@ -204,8 +216,11 @@ numpy==1.19.5
     #   ale-py
     #   gym
     #   h5py
+    #   imageio
     #   keras-preprocessing
     #   matplotlib
+    #   moviepy
+    #   opencv-python
     #   opt-einsum
     #   pandas
     #   scipy
@@ -214,6 +229,8 @@ numpy==1.19.5
     #   tensorflow-gpu
 oauthlib==3.1.1
     # via requests-oauthlib
+opencv-python==4.5.3.56
+    # via -r requirements.in
 opt-einsum==3.3.0
     # via tensorflow-gpu
 packaging==21.0
@@ -238,13 +255,17 @@ pexpect==4.8.0
 pickleshare==0.7.5
     # via ipython
 pillow==8.3.2
-    # via matplotlib
+    # via
+    #   imageio
+    #   matplotlib
 pip-tools==6.3.1
     # via -r requirements.in
 plotly==5.3.1
     # via -r requirements.in
 poyo==0.5.0
     # via cookiecutter
+proglog==0.1.9
+    # via moviepy
 prometheus-client==0.11.0
     # via
     #   jupyter-server
@@ -305,6 +326,7 @@ requests==2.26.0
     # via
     #   cookiecutter
     #   jupyterlab-server
+    #   moviepy
     #   requests-oauthlib
     #   requests-unixsocket
     #   tensorboard
@@ -372,6 +394,10 @@ tornado==6.1
     #   jupyterlab
     #   notebook
     #   terminado
+tqdm==4.62.3
+    # via
+    #   moviepy
+    #   proglog
 traitlets==5.1.0
     # via
     #   ipykernel
