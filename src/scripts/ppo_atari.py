@@ -108,7 +108,7 @@ def make_env(gym_id, seed, idx, capture_video, run_name, atariari=True):
         if "FIRE" in env.unwrapped.get_action_meanings():
             env = FireResetEnv(env)
         env = ClipRewardEnv(env)
-        env = gym.wrappers.ResizeObservation(env, (84, 84))
+        # env = gym.wrappers.ResizeObservation(env, (84, 84))
         env = gym.wrappers.GrayScaleObservation(env)
         env = gym.wrappers.FrameStack(env, 4)
         env.seed(seed)
@@ -119,37 +119,115 @@ def make_env(gym_id, seed, idx, capture_video, run_name, atariari=True):
     return thunk
 
 
+class Flatten(nn.Module):
+    # https://github.com/ikostrikov/pytorch-a2c-ppo-acktr-gail/
+    def forward(self, x):
+        return x.view(x.size(0), -1)
+
+
+def init(module, weight_init, bias_init, gain=1):
+    # https://github.com/ikostrikov/pytorch-a2c-ppo-acktr-gail/
+    weight_init(module.weight.data, gain=gain)
+    bias_init(module.bias.data)
+    return module
+
+
+class NatureCNN(nn.Module):
+    def __init__(self, input_channels, feature_size):
+        super().__init__()
+        self.feature_size = feature_size
+        self.hidden_size = feature_size
+        self.input_channels = input_channels
+        init_ = lambda m: init(
+            m,
+            nn.init.orthogonal_,
+            lambda x: nn.init.constant_(x, 0),
+            nn.init.calculate_gain("relu"),
+        )
+        self.flatten = Flatten()
+
+        self.final_conv_size = 64 * 9 * 6
+        self.final_conv_shape = (64, 9, 6)
+        self.main = nn.Sequential(
+            init_(nn.Conv2d(input_channels, 32, 8, stride=4)),
+            nn.ReLU(),
+            init_(nn.Conv2d(32, 64, 4, stride=2)),
+            nn.ReLU(),
+            init_(nn.Conv2d(64, 128, 4, stride=2)),
+            nn.ReLU(),
+            init_(nn.Conv2d(128, 64, 3, stride=1)),
+            nn.ReLU(),
+            Flatten(),
+            init_(nn.Linear(self.final_conv_size, self.feature_size)),
+            # nn.ReLU()
+        )
+        self.train()
+
+    @property
+    def local_layer_depth(self):
+        return self.main[4].out_channels
+
+    def forward(self, inputs, fmaps=False):
+        f5 = self.main[:6](inputs)
+        f7 = self.main[6:8](f5)
+        out = self.main[8:](f7)
+        if fmaps:
+            return {
+                "f5": f5.permute(0, 2, 3, 1),
+                "f7": f7.permute(0, 2, 3, 1),
+                "out": out,
+            }
+        return out
+
+
 class Agent(nn.Module):
     def __init__(self, envs):
         super(Agent, self).__init__()
-        self.network = nn.Sequential(
-            layer_init(nn.Conv2d(4, 32, 8, stride=4)),
-            nn.ReLU(),
-            layer_init(nn.Conv2d(32, 64, 4, stride=2)),
-            nn.ReLU(),
-            layer_init(nn.Conv2d(64, 64, 3, stride=1)),
-            nn.ReLU(),
-            nn.Flatten(),
-            layer_init(nn.Linear(64 * 7 * 7, 512)),
-            nn.ReLU(),
+
+        self.feature_size = 256
+
+        self.network = NatureCNN(input_channels=4, feature_size=self.feature_size)
+
+        # self.network = nn.Sequential(
+        #     layer_init(nn.Conv2d(4, 32, 8, stride=4)),
+        #     nn.ReLU(),
+        #     layer_init(nn.Conv2d(32, 64, 4, stride=2)),
+        #     nn.ReLU(),
+        #     layer_init(nn.Conv2d(64, 64, 3, stride=1)),
+        #     nn.ReLU(),
+        #     nn.Flatten(),
+        #     layer_init(nn.Linear(64 * 7 * 7, 512)),
+        #     nn.ReLU(),
+        # )
+
+        self.actor = layer_init(
+            nn.Linear(self.feature_size, envs.single_action_space.n), std=0.01
         )
-        self.actor = layer_init(nn.Linear(512, envs.single_action_space.n), std=0.01)
-        self.critic = layer_init(nn.Linear(512, 1), std=1)
-        self.repr_classifier = layer_init(nn.Linear(512, 512))
+        self.critic = layer_init(nn.Linear(self.feature_size, 1), std=1)
+
+        # TODO should we add the Classifier class (with Bilinear layer?)
+        self.classifier1 = nn.Linear(
+            self.feature_size, self.network.local_layer_depth
+        ).to(
+            device
+        )  # x1 = global, x2=patch, n_channels = 32
+        self.classifier2 = nn.Linear(
+            self.network.local_layer_depth, self.network.local_layer_depth
+        ).to(device)
 
     def get_value(self, x):
         return self.critic(self.network(x / 255.0))
 
     def get_action_and_value(self, x, action=None):
-        hidden = self.network(x / 255.0)
+        hidden = self.network(x / 255.0)  # self.network(x / 255.0)
         logits = self.actor(hidden)
         probs = Categorical(logits=logits)
         if action is None:
             action = probs.sample()
         return action, probs.log_prob(action), probs.entropy(), self.critic(hidden)
 
-    def get_representation(self, x):
-        return self.network(x / 255.0)  # NxC
+    def get_representation(self, x, fmaps=True):
+        return self.network(x / 255.0, fmaps=fmaps)
 
 
 if __name__ == "__main__":
@@ -308,17 +386,43 @@ if __name__ == "__main__":
                 end = start + args.minibatch_size
                 mb_inds = b_inds[start:end]
 
+                # Constrastive learning - mila-iqia stdim.py
                 x_t_ind = mb_inds[mb_inds >= 128]
                 x_t_prev_ind = x_t_ind - 128
                 x_t, x_t_prev = b_obs[x_t_ind], b_obs[x_t_prev_ind]
 
-                f_t = agent.get_representation(x_t)
-                f_t_prev = agent.get_representation(x_t_prev)
+                f_t_maps = agent.get_representation(x_t)
+                f_t_prev_maps = agent.get_representation(x_t_prev)
+
+                f_t = f_t_maps["out"]  # N x feature_size
+                f_t_prev = f_t_prev_maps["f5"]  # N x 11 x 8 x 128
+                sy = f_t_prev.size(1)  # 11
+                sx = f_t_prev.size(2)  # 8
 
                 N = f_t.size(0)
-                z_t = agent.repr_classifier(f_t)
-                logits = torch.matmul(z_t, f_t_prev.t())
-                contrastive_loss = F.cross_entropy(logits, torch.arange(N).to(device))
+                loss1 = 0.0
+                predictions = agent.classifier1(f_t)  # N x 128
+                for y in range(sy):
+                    for x in range(sx):
+                        positive = f_t_prev[:, y, x, :]  # N x 128
+                        logits = torch.matmul(predictions, positive.t())  # N x N
+                        step_loss = F.cross_entropy(logits, torch.arange(N).to(device))
+                        loss1 += step_loss
+                loss1 = loss1 / (sx * sy)
+
+                # Loss 2: f5 patches at time t, with f5 patches at time t-1
+                f_t = f_t_maps["f5"]
+                loss2 = 0.0
+                for y in range(sy):
+                    for x in range(sx):
+                        predictions = agent.classifier2(f_t[:, y, x, :])
+                        positive = f_t_prev[:, y, x, :]
+                        logits = torch.matmul(predictions, positive.t())
+                        step_loss = F.cross_entropy(logits, torch.arange(N).to(device))
+                        loss2 += step_loss
+                loss2 = loss2 / (sx * sy)
+                contrastive_loss = loss1 + loss2
+                # End of contrastive learning
 
                 _, newlogprob, entropy, newvalue = agent.get_action_and_value(
                     b_obs[mb_inds], b_actions.long()[mb_inds]
@@ -364,9 +468,10 @@ if __name__ == "__main__":
 
                 entropy_loss = entropy.mean()
 
-                contr_coef = 1.0
+                contr_coef = 0.1
 
                 ## TODO: + or - contrastive_loss?
+                ## TODO: contr_coef = ?
                 loss = (
                     pg_loss
                     - args.ent_coef * entropy_loss
