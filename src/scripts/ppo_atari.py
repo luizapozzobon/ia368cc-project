@@ -10,6 +10,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+from atariari.benchmark.wrapper import AtariARIWrapper
 from stable_baselines3.common.atari_wrappers import (
     ClipRewardEnv,
     EpisodicLifeEnv,
@@ -19,8 +20,6 @@ from stable_baselines3.common.atari_wrappers import (
 )
 from torch.distributions.categorical import Categorical
 from torch.utils.tensorboard import SummaryWriter
-
-from wrapper import AtariARIWrapper
 
 
 def parse_args():
@@ -187,18 +186,6 @@ class Agent(nn.Module):
         self.feature_size = 256
 
         self.network = NatureCNN(input_channels=4, feature_size=self.feature_size)
-
-        # self.network = nn.Sequential(
-        #     layer_init(nn.Conv2d(4, 32, 8, stride=4)),
-        #     nn.ReLU(),
-        #     layer_init(nn.Conv2d(32, 64, 4, stride=2)),
-        #     nn.ReLU(),
-        #     layer_init(nn.Conv2d(64, 64, 3, stride=1)),
-        #     nn.ReLU(),
-        #     nn.Flatten(),
-        #     layer_init(nn.Linear(64 * 7 * 7, 512)),
-        #     nn.ReLU(),
-        # )
 
         self.actor = layer_init(
             nn.Linear(self.feature_size, envs.single_action_space.n), std=0.01
