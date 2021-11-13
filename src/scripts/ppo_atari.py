@@ -3,6 +3,7 @@ import os
 import random
 import time
 from distutils.util import strtobool
+from itertools import chain
 
 import gym
 import numpy as np
@@ -10,14 +11,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+from atariari.benchmark.probe import ProbeTrainer
 from atariari.benchmark.wrapper import AtariARIWrapper
-from stable_baselines3.common.atari_wrappers import (
-    ClipRewardEnv,
-    EpisodicLifeEnv,
-    FireResetEnv,
-    MaxAndSkipEnv,
-    NoopResetEnv,
-)
+from stable_baselines3.common.atari_wrappers import (ClipRewardEnv,
+                                                     EpisodicLifeEnv,
+                                                     FireResetEnv,
+                                                     MaxAndSkipEnv,
+                                                     NoopResetEnv)
 from torch.distributions.categorical import Categorical
 from torch.utils.tensorboard import SummaryWriter
 
@@ -79,6 +79,26 @@ def parse_args():
         help='the maximum norm for the gradient clipping')
     parser.add_argument('--target-kl', type=float, default=None,
         help='the target KL divergence threshold')
+
+    # Contrastive learning parameters
+    parser.add_argument('--contrastive-training',
+        type=lambda x: bool(strtobool(x)),
+        default=False, nargs='?', const=True,
+        help='if toggled, this experiment will perform contrastive learning on agent')
+    parser.add_argument('--contr-coef', type=float, default=0.1,
+        help='the contrastive loss coeficient')
+
+    # Probe parameters
+    parser.add_argument('--probe-episodes', type=int, default=5,
+        help='the number of episodes to collect in order to train the probe')
+    parser.add_argument('--probe-epochs', type=int, default=5,
+        help='the number epochs to train the probe for')
+    parser.add_argument('--probe-batch-size', type=int, default=64,
+        help='the batch size for probe training')
+    parser.add_argument('--probe-train-interval', type=int, default=15,
+        help='after how many agent updates should we train the probe')
+
+
     args = parser.parse_args()
     args.batch_size = int(args.num_envs * args.num_steps)
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
@@ -109,7 +129,7 @@ def make_env(gym_id, seed, idx, capture_video, run_name, atariari=True):
         env = ClipRewardEnv(env)
         # env = gym.wrappers.ResizeObservation(env, (84, 84))
         env = gym.wrappers.GrayScaleObservation(env)
-        env = gym.wrappers.FrameStack(env, 4)
+        env = gym.wrappers.FrameStack(env, 1)
         env.seed(seed)
         env.action_space.seed(seed)
         env.observation_space.seed(seed)
@@ -185,7 +205,7 @@ class Agent(nn.Module):
 
         self.feature_size = 256
 
-        self.network = NatureCNN(input_channels=4, feature_size=self.feature_size)
+        self.network = NatureCNN(input_channels=1, feature_size=self.feature_size)
 
         self.actor = layer_init(
             nn.Linear(self.feature_size, envs.single_action_space.n), std=0.01
@@ -219,6 +239,9 @@ class Agent(nn.Module):
 
 if __name__ == "__main__":
     args = parse_args()
+
+    assert args.probe_episodes <= args.probe_train_interval
+
     run_name = f"{args.gym_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
     if args.track:
         import wandb
@@ -279,13 +302,31 @@ if __name__ == "__main__":
     next_obs = torch.Tensor(envs.reset()).to(device)
     next_done = torch.zeros(args.num_envs).to(device)
     num_updates = args.total_timesteps // args.batch_size
+    record = False
+
+    def reset_probe_records():
+        episodes = [[[]] for _ in range(args.num_envs)]
+        episode_labels = [[[]] for _ in range(args.num_envs)]
+        episode_count = 0
+        return episodes, episode_labels, episode_count
 
     for update in range(1, num_updates + 1):
+        print(f"---- Update step: {update}")
         # Annealing the rate if instructed to do so.
         if args.anneal_lr:
             frac = 1.0 - (update - 1.0) / num_updates
             lrnow = frac * args.learning_rate
             optimizer.param_groups[0]["lr"] = lrnow
+
+        # Reset/init probe labels
+        # e.g. probe_train_interval = 10, probe_episodes = 2
+        # collect samples of updates 9 and 10 to train probe on update 10
+        if (
+            (update % args.probe_train_interval) + args.probe_episodes - 1
+        ) % args.probe_train_interval == 0:
+            print("Start collecting probe samples on update: ", update)
+            episodes, episode_labels, episode_count = reset_probe_records()
+            record = True
 
         for step in range(0, args.num_steps):
             global_step += 1 * args.num_envs
@@ -306,7 +347,20 @@ if __name__ == "__main__":
                 done
             ).to(device)
 
-            for item in info:
+            for i, item in enumerate(info):
+                # Used in probe validation
+                if record:
+                    if episode_count > (len(episodes[i]) - 1):
+                        # When there are more counts than registered episodes for agent, add new episode
+                        episodes[i].append([next_obs[i].clone()])
+                        if "labels" in item.keys():
+                            episode_labels[i].append([item["labels"]])
+                    else:
+                        # Else, append to current episode
+                        episodes[i][episode_count].append(next_obs[i].clone())
+                        if "labels" in item.keys():
+                            episode_labels[i][-1].append(item["labels"])
+
                 if "episode" in item.keys():
                     print(
                         f"global_step={global_step}, episodic_return={item['episode']['r']}"
@@ -373,43 +427,48 @@ if __name__ == "__main__":
                 end = start + args.minibatch_size
                 mb_inds = b_inds[start:end]
 
-                # Constrastive learning - mila-iqia stdim.py
-                x_t_ind = mb_inds[mb_inds >= 128]
-                x_t_prev_ind = x_t_ind - 128
-                x_t, x_t_prev = b_obs[x_t_ind], b_obs[x_t_prev_ind]
+                if args.contrastive_training:
+                    # Constrastive learning - mila-iqia stdim.py
+                    x_t_ind = mb_inds[mb_inds >= 128]
+                    x_t_prev_ind = x_t_ind - 128
+                    x_t, x_t_prev = b_obs[x_t_ind], b_obs[x_t_prev_ind]
 
-                f_t_maps = agent.get_representation(x_t)
-                f_t_prev_maps = agent.get_representation(x_t_prev)
+                    f_t_maps = agent.get_representation(x_t)
+                    f_t_prev_maps = agent.get_representation(x_t_prev)
 
-                f_t = f_t_maps["out"]  # N x feature_size
-                f_t_prev = f_t_prev_maps["f5"]  # N x 11 x 8 x 128
-                sy = f_t_prev.size(1)  # 11
-                sx = f_t_prev.size(2)  # 8
+                    f_t = f_t_maps["out"]  # N x feature_size
+                    f_t_prev = f_t_prev_maps["f5"]  # N x 11 x 8 x 128
+                    sy = f_t_prev.size(1)  # 11
+                    sx = f_t_prev.size(2)  # 8
 
-                N = f_t.size(0)
-                loss1 = 0.0
-                predictions = agent.classifier1(f_t)  # N x 128
-                for y in range(sy):
-                    for x in range(sx):
-                        positive = f_t_prev[:, y, x, :]  # N x 128
-                        logits = torch.matmul(predictions, positive.t())  # N x N
-                        step_loss = F.cross_entropy(logits, torch.arange(N).to(device))
-                        loss1 += step_loss
-                loss1 = loss1 / (sx * sy)
+                    N = f_t.size(0)
+                    loss1 = 0.0
+                    predictions = agent.classifier1(f_t)  # N x 128
+                    for y in range(sy):
+                        for x in range(sx):
+                            positive = f_t_prev[:, y, x, :]  # N x 128
+                            logits = torch.matmul(predictions, positive.t())  # N x N
+                            step_loss = F.cross_entropy(
+                                logits, torch.arange(N).to(device)
+                            )
+                            loss1 += step_loss
+                    loss1 = loss1 / (sx * sy)
 
-                # Loss 2: f5 patches at time t, with f5 patches at time t-1
-                f_t = f_t_maps["f5"]
-                loss2 = 0.0
-                for y in range(sy):
-                    for x in range(sx):
-                        predictions = agent.classifier2(f_t[:, y, x, :])
-                        positive = f_t_prev[:, y, x, :]
-                        logits = torch.matmul(predictions, positive.t())
-                        step_loss = F.cross_entropy(logits, torch.arange(N).to(device))
-                        loss2 += step_loss
-                loss2 = loss2 / (sx * sy)
-                contrastive_loss = loss1 + loss2
-                # End of contrastive learning
+                    # Loss 2: f5 patches at time t, with f5 patches at time t-1
+                    f_t = f_t_maps["f5"]
+                    loss2 = 0.0
+                    for y in range(sy):
+                        for x in range(sx):
+                            predictions = agent.classifier2(f_t[:, y, x, :])
+                            positive = f_t_prev[:, y, x, :]
+                            logits = torch.matmul(predictions, positive.t())
+                            step_loss = F.cross_entropy(
+                                logits, torch.arange(N).to(device)
+                            )
+                            loss2 += step_loss
+                    loss2 = loss2 / (sx * sy)
+                    contrastive_loss = loss1 + loss2
+                    # End of contrastive learning
 
                 _, newlogprob, entropy, newvalue = agent.get_action_and_value(
                     b_obs[mb_inds], b_actions.long()[mb_inds]
@@ -455,7 +514,8 @@ if __name__ == "__main__":
 
                 entropy_loss = entropy.mean()
 
-                contr_coef = 0.1
+                if not args.contrastive_training:
+                    contrastive_loss = 0
 
                 ## TODO: + or - contrastive_loss?
                 ## TODO: contr_coef = ?
@@ -463,7 +523,7 @@ if __name__ == "__main__":
                     pg_loss
                     - args.ent_coef * entropy_loss
                     + v_loss * args.vf_coef
-                    + contrastive_loss * contr_coef
+                    + contrastive_loss * args.contr_coef
                 )
 
                 optimizer.zero_grad()
@@ -479,7 +539,64 @@ if __name__ == "__main__":
         var_y = np.var(y_true)
         explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
 
+        if record:
+            episode_count += 1
+            # Stop recording when the length of collected episodes equals the probe target length
+            if len(episodes[0]) == args.probe_episodes:
+                record = False
+
+        # Representation probes training and testing
+        # Probing can be executed without contrastive training
+        if "episodes" in vars():
+            if len(episodes[0]) == args.probe_episodes:
+                assert update % args.probe_train_interval == 0
+
+                print(f"Training probe on update {update}")
+                # Convert to 2d list from 3d list
+                episodes = list(chain.from_iterable(episodes))
+                episode_labels = list(chain.from_iterable(episode_labels))
+
+                inds = np.arange(len(episodes))
+                rng = np.random.RandomState(seed=args.seed)
+                rng.shuffle(inds)
+
+                val_split_ind, te_split_ind = int(0.7 * len(inds)), int(0.8 * len(inds))
+                assert (
+                    val_split_ind > 0 and te_split_ind > val_split_ind
+                ), "Not enough episodes to split into train, val and test. You must specify more steps"
+                tr_eps, val_eps, test_eps = (
+                    episodes[:val_split_ind],
+                    episodes[val_split_ind:te_split_ind],
+                    episodes[te_split_ind:],
+                )
+                tr_labels, val_labels, test_labels = (
+                    episode_labels[:val_split_ind],
+                    episode_labels[val_split_ind:te_split_ind],
+                    episode_labels[te_split_ind:],
+                )
+                # test_eps, test_labels = remove_duplicates(
+                #     tr_eps, val_eps, test_eps, test_labels
+                # )
+                test_ep_inds = [i for i in range(len(test_eps)) if len(test_eps[i]) > 1]
+                test_eps = [test_eps[i] for i in test_ep_inds]
+                test_labels = [test_labels[i] for i in test_ep_inds]
+
+                trainer = ProbeTrainer(
+                    encoder=agent.network,
+                    epochs=args.probe_epochs,
+                    batch_size=args.probe_batch_size,
+                )
+
+                trainer.train(tr_eps, val_eps, tr_labels, val_labels)
+                test_acc, test_f1score = trainer.test(test_eps, test_labels)
+
+                episodes, episode_labels, episode_count = reset_probe_records()
+
         # TRY NOT TO MODIFY: record rewards for plotting purposes
+        print("SPS:", int(global_step / (time.time() - start_time)))
+        writer.add_scalar(
+            "charts/SPS", int(global_step / (time.time() - start_time)), global_step
+        )
         writer.add_scalar(
             "charts/learning_rate", optimizer.param_groups[0]["lr"], global_step
         )
@@ -489,13 +606,20 @@ if __name__ == "__main__":
         writer.add_scalar("losses/approx_kl", approx_kl.item(), global_step)
         writer.add_scalar("losses/clipfrac", np.mean(clipfracs), global_step)
         writer.add_scalar("losses/explained_variance", explained_var, global_step)
-        writer.add_scalar(
-            "losses/contrastive_loss", contrastive_loss.item(), global_step
-        )
-        print("SPS:", int(global_step / (time.time() - start_time)))
-        writer.add_scalar(
-            "charts/SPS", int(global_step / (time.time() - start_time)), global_step
-        )
+
+        if args.contrastive_training:
+            writer.add_scalar(
+                "losses/contrastive_loss", contrastive_loss.item(), global_step
+            )
+
+        # Probing can be executed without contrastive training
+        if "test_acc" in vars() and update % args.probe_train_interval == 0:
+            for key in test_acc:
+                writer.add_scalar(f"probe/test_acc/{key}", test_acc[key], global_step)
+            for key in test_f1score:
+                writer.add_scalar(
+                    f"probe/test_f1score/{key}", test_f1score[key], global_step
+                )
 
     envs.close()
     writer.close()
