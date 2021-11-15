@@ -13,11 +13,13 @@ import torch.nn.functional as F
 import torch.optim as optim
 from atariari.benchmark.probe import ProbeTrainer
 from atariari.benchmark.wrapper import AtariARIWrapper
-from stable_baselines3.common.atari_wrappers import (ClipRewardEnv,
-                                                     EpisodicLifeEnv,
-                                                     FireResetEnv,
-                                                     MaxAndSkipEnv,
-                                                     NoopResetEnv)
+from stable_baselines3.common.atari_wrappers import (
+    ClipRewardEnv,
+    EpisodicLifeEnv,
+    FireResetEnv,
+    MaxAndSkipEnv,
+    NoopResetEnv,
+)
 from torch.distributions.categorical import Categorical
 from torch.utils.tensorboard import SummaryWriter
 
@@ -97,6 +99,14 @@ def parse_args():
         help='the batch size for probe training')
     parser.add_argument('--probe-train-interval', type=int, default=15,
         help='after how many agent updates should we train the probe')
+
+
+    # Experiment parameters
+    parser.add_argument('--experiment-tag', type=str, default="default-tag", help="the tag of the experiment being ran")
+    parser.add_argument('--atari-100k',
+        type=lambda x: bool(strtobool(x)),
+        default=False, nargs='?', const=True,
+        help='if toggled, this experiment will run only 100k iterations with the environment')
 
 
     args = parser.parse_args()
@@ -202,7 +212,6 @@ class NatureCNN(nn.Module):
 class Agent(nn.Module):
     def __init__(self, envs):
         super(Agent, self).__init__()
-
         self.feature_size = 256
 
         self.network = NatureCNN(input_channels=1, feature_size=self.feature_size)
@@ -283,6 +292,11 @@ if __name__ == "__main__":
 
     agent = Agent(envs).to(device)
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
+    trainer = ProbeTrainer(
+        encoder=agent.network,
+        epochs=args.probe_epochs,
+        batch_size=args.probe_batch_size,
+    )
 
     # ALGO Logic: Storage setup
     obs = torch.zeros(
@@ -581,12 +595,6 @@ if __name__ == "__main__":
                 test_eps = [test_eps[i] for i in test_ep_inds]
                 test_labels = [test_labels[i] for i in test_ep_inds]
 
-                trainer = ProbeTrainer(
-                    encoder=agent.network,
-                    epochs=args.probe_epochs,
-                    batch_size=args.probe_batch_size,
-                )
-
                 trainer.train(tr_eps, val_eps, tr_labels, val_labels)
                 test_acc, test_f1score = trainer.test(test_eps, test_labels)
 
@@ -620,6 +628,10 @@ if __name__ == "__main__":
                 writer.add_scalar(
                     f"probe/test_f1score/{key}", test_f1score[key], global_step
                 )
+
+        if args.atari_100k:
+            if global_step >= 100000:
+                break
 
     envs.close()
     writer.close()
