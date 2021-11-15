@@ -87,6 +87,10 @@ def parse_args():
         type=lambda x: bool(strtobool(x)),
         default=False, nargs='?', const=True,
         help='if toggled, this experiment will perform contrastive learning on agent')
+    parser.add_argument('--previous-obs',
+        type=lambda x: bool(strtobool(x)),
+        default=False, nargs='?', const=True,
+        help='if toggled, the previous observation will be used in the contrastive learning setting instead of the posterior')
     parser.add_argument('--contr-coef', type=float, default=0.1,
         help='the contrastive loss coeficient')
 
@@ -435,6 +439,7 @@ if __name__ == "__main__":
         indexes_matrix = indexes.reshape(obs.shape[:2])
         b_inds = indexes.copy()
         clipfracs = []
+
         for epoch in range(args.update_epochs):
             np.random.shuffle(b_inds)
             for start in range(0, args.batch_size, args.minibatch_size):
@@ -443,24 +448,32 @@ if __name__ == "__main__":
 
                 if args.contrastive_training:
                     # Constrastive learning - mila-iqia stdim.py
-                    x_t_ind = mb_inds[mb_inds >= 128]
-                    x_t_prev_ind = x_t_ind - 128
-                    x_t, x_t_prev = b_obs[x_t_ind], b_obs[x_t_prev_ind]
+
+                    if args.previous_obs:
+                        # Previous observatios - This is as the original code
+                        x_t_ind = mb_inds[mb_inds >= 128]
+                        x_t_other_ind = x_t_ind - 128
+                    else:
+                        # Posterior observation - As described in the paper
+                        x_t_ind = mb_inds[mb_inds < (args.batch_size - 128)]
+                        x_t_other_ind = x_t_ind + 128
+
+                    x_t, x_t_other = b_obs[x_t_ind], b_obs[x_t_other_ind]
 
                     f_t_maps = agent.get_representation(x_t)
-                    f_t_prev_maps = agent.get_representation(x_t_prev)
+                    f_t_other_maps = agent.get_representation(x_t_other)
 
                     f_t = f_t_maps["out"]  # N x feature_size
-                    f_t_prev = f_t_prev_maps["f5"]  # N x 11 x 8 x 128
-                    sy = f_t_prev.size(1)  # 11
-                    sx = f_t_prev.size(2)  # 8
+                    f_t_other = f_t_other_maps["f5"]  # N x 11 x 8 x 128
+                    sy = f_t_other.size(1)  # 11
+                    sx = f_t_other.size(2)  # 8
 
                     N = f_t.size(0)
                     loss1 = 0.0
                     predictions = agent.classifier1(f_t)  # N x 128
                     for y in range(sy):
                         for x in range(sx):
-                            positive = f_t_prev[:, y, x, :]  # N x 128
+                            positive = f_t_other[:, y, x, :]  # N x 128
                             logits = torch.matmul(predictions, positive.t())  # N x N
                             step_loss = F.cross_entropy(
                                 logits, torch.arange(N).to(device)
@@ -474,7 +487,7 @@ if __name__ == "__main__":
                     for y in range(sy):
                         for x in range(sx):
                             predictions = agent.classifier2(f_t[:, y, x, :])
-                            positive = f_t_prev[:, y, x, :]
+                            positive = f_t_other[:, y, x, :]
                             logits = torch.matmul(predictions, positive.t())
                             step_loss = F.cross_entropy(
                                 logits, torch.arange(N).to(device)
