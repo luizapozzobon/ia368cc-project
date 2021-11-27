@@ -1,7 +1,24 @@
 ia368cc-project
 ==============================
 
-An attempt to inject neuro-symbolic techniques into reinforcement learning.
+Injecting object-level implicit priors in a PPO agent with contrastive learning algorithm [ST-DIM](https://github.com/mila-iqia/atari-representation-learning). Our PPO code was borrowed from https://github.com/vwxyzjn/cleanrl.
+
+Setup
+------------
+
+The experiments were ran with PyTorch 1.8.1
+
+``` 
+# Create Conda environment for this repo
+make create_environment
+
+# Install PyTorch dependencies
+pip install torch==1.8.1+cu101 torchvision==0.9.1+cu101 -f https://download.pytorch.org/whl/torch_stable.html
+
+# Install requirements
+make requirements
+```
+
 
 Project Organization
 ------------
