@@ -5,9 +5,9 @@ import time
 from distutils.util import strtobool
 from itertools import chain
 
+import torch
 import gym
 import numpy as np
-import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
@@ -194,6 +194,7 @@ class NatureCNN(nn.Module):
             init_(nn.Linear(self.final_conv_size, self.feature_size)),
             # nn.ReLU()
         )
+        self.main = self.main.to(device)
         self.train()
 
     @property
@@ -218,12 +219,12 @@ class Agent(nn.Module):
         super(Agent, self).__init__()
         self.feature_size = 256
 
-        self.network = NatureCNN(input_channels=1, feature_size=self.feature_size)
+        self.network = NatureCNN(input_channels=1, feature_size=self.feature_size).to(device)
 
         self.actor = layer_init(
             nn.Linear(self.feature_size, envs.single_action_space.n), std=0.01
-        )
-        self.critic = layer_init(nn.Linear(self.feature_size, 1), std=1)
+        ).to(device)
+        self.critic = layer_init(nn.Linear(self.feature_size, 1), std=1).to(device)
 
         # TODO should we add the Classifier class (with Bilinear layer?)
         self.classifier1 = nn.Linear(
@@ -252,7 +253,6 @@ class Agent(nn.Module):
 
 if __name__ == "__main__":
     args = parse_args()
-
     assert args.probe_episodes <= args.probe_train_interval
 
     run_name = f"{args.gym_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
@@ -281,7 +281,7 @@ if __name__ == "__main__":
     torch.manual_seed(args.seed)
     torch.backends.cudnn.deterministic = args.torch_deterministic
 
-    device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
+    device = torch.device("cuda:1" if torch.cuda.is_available() and args.cuda else "cpu")
 
     # env setup
     envs = gym.vector.SyncVectorEnv(
@@ -300,7 +300,9 @@ if __name__ == "__main__":
         encoder=agent.network,
         epochs=args.probe_epochs,
         batch_size=args.probe_batch_size,
+        device=device
     )
+
 
     # ALGO Logic: Storage setup
     obs = torch.zeros(
@@ -460,8 +462,8 @@ if __name__ == "__main__":
 
                     x_t, x_t_other = b_obs[x_t_ind], b_obs[x_t_other_ind]
 
-                    f_t_maps = agent.get_representation(x_t)
-                    f_t_other_maps = agent.get_representation(x_t_other)
+                    f_t_maps = agent.get_representation(x_t.to(device))
+                    f_t_other_maps = agent.get_representation(x_t_other.to(device))
 
                     f_t = f_t_maps["out"]  # N x feature_size
                     f_t_other = f_t_other_maps["f5"]  # N x 11 x 8 x 128
