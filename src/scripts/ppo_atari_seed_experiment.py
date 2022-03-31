@@ -388,22 +388,24 @@ if __name__ == "__main__":
         explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
 
         # TRY NOT TO MODIFY: record rewards for plotting purposes
-        wandb.log(
-            {
-                "charts/global_step_metrics": global_step,
-                "charts/learning_rate": optimizer.param_groups[0]["lr"],
-                "losses/value_loss": v_loss.item(),
-                "losses/policy_loss": pg_loss.item(),
-                "losses/entropy": entropy_loss.item(),
-                "losses/old_approx_kl": old_approx_kl.item(),
-                "losses/approx_kl": approx_kl.item(),
-                "losses/clipfrac": np.mean(clipfracs),
-                "losses/explained_variance": explained_var,
-                "charts/SPS": int(global_step / (time.time() - start_time)),
-            }
-        )
+        if args.track:
+            wandb.log(
+                {
+                    "charts/global_step_metrics": global_step,
+                    "charts/learning_rate": optimizer.param_groups[0]["lr"],
+                    "losses/value_loss": v_loss.item(),
+                    "losses/policy_loss": pg_loss.item(),
+                    "losses/entropy": entropy_loss.item(),
+                    "losses/old_approx_kl": old_approx_kl.item(),
+                    "losses/approx_kl": approx_kl.item(),
+                    "losses/clipfrac": np.mean(clipfracs),
+                    "losses/explained_variance": explained_var,
+                    "charts/SPS": int(global_step / (time.time() - start_time)),
+                }
+            )
 
     ## Test loop
+    agent.eval()
     if args.patch_env_seed:
         # Validate training seeds and test test seeds
         test_seeds = args.env_seeds + args.test_seeds
@@ -464,32 +466,33 @@ if __name__ == "__main__":
                             break
 
                 print("SPS:", int(test_step / (time.time() - start_time)))
-                wandb.log(
-                    {
-                        f"test_charts/SPS_seed={test_seed}": int(
-                            test_step / (time.time() - start_time)
-                        ),
-                        "test_step": test_step,
-                    }
-                )
-
-        wandb.log(
-            {
-                "test_charts/episodic_returns": wandb.plot.line_series(
-                    xs=list(episodic_test_steps.values()),
-                    ys=list(episodic_returns.values()),
-                    keys=list(episodic_returns.keys()),
-                    title="Test Episodic Return",
-                    xname="Test Step",
-                ),
-                "test_charts/episodic_length": wandb.plot.line_series(
-                    xs=list(episodic_test_steps.values()),
-                    ys=list(episodic_length.values()),
-                    keys=list(episodic_length.keys()),
-                    title="Test Episodic Return",
-                    xname="Test Step",
-                ),
-            }
-        )
+                if args.track:
+                    wandb.log(
+                        {
+                            f"test_charts/SPS_seed={test_seed}": int(
+                                test_step / (time.time() - start_time)
+                            ),
+                            "test_step": test_step,
+                        }
+                    )
+        if args.track:
+            wandb.log(
+                {
+                    "test_charts/episodic_returns": wandb.plot.line_series(
+                        xs=list(episodic_test_steps.values()),
+                        ys=list(episodic_returns.values()),
+                        keys=list(episodic_returns.keys()),
+                        title="Test Episodic Return",
+                        xname="Test Step",
+                    ),
+                    "test_charts/episodic_length": wandb.plot.line_series(
+                        xs=list(episodic_test_steps.values()),
+                        ys=list(episodic_length.values()),
+                        keys=list(episodic_length.keys()),
+                        title="Test Episodic Return",
+                        xname="Test Step",
+                    ),
+                }
+            )
 
     envs.close()
